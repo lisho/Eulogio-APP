@@ -133,6 +133,44 @@
     /* Remove default margin from the first/last P or H tag if it's the first/last child */
     .bot-message-content > *:first-child { margin-top: 0 !important; }
     .bot-message-content > *:last-child { margin-bottom: 0 !important; }
+
+    /* Inline Bouncing Dots Spinner for initial greeting */
+    .inline-bouncing-dots {
+      display: inline-flex; /* Aligns dots horizontally */
+      align-items: center;  /* Vertically aligns dots with the text line */
+      margin-left: 5px;    /* Space between "saludo..." and the dots */
+      height: 1em;          /* Helps in vertical alignment with text */
+      vertical-align: middle; /* Improves alignment with surrounding text */
+    }
+    .inline-bouncing-dots span {
+      display: inline-block;
+      width: 6px; 
+      height: 6px; 
+      background-color: var(--color-primary-dark); 
+      border-radius: 50%; 
+      margin: 0 1.5px; 
+      animation: customBounceKeyframe 1s infinite ease-in-out; /* Use ease-in-out for smoother bounce */
+    }
+    .inline-bouncing-dots span:nth-child(1) {
+      animation-delay: -0.32s; /* Stagger the animation */
+    }
+    .inline-bouncing-dots span:nth-child(2) {
+      animation-delay: -0.16s;
+    }
+    .inline-bouncing-dots span:nth-child(3) {
+      animation-delay: 0s;
+    }
+
+    @keyframes customBounceKeyframe {
+      0%, 80%, 100% { /* Dots are small or invisible at start, end, and for a pause */
+        transform: translateY(0) scale(0.5); /* Start slightly scaled down and at baseline */
+        opacity: 0.5;
+      }
+      40% { /* Dot is at peak of bounce */
+        transform: translateY(-5px) scale(1); /* Move up and scale to full size */
+        opacity: 1;
+      }
+    }
   </style>
 <script type="importmap">
 {
