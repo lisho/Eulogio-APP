@@ -8,6 +8,8 @@ import { createChatSession, sendMessageToGeminiStream } from './services/geminiS
 import { Chat, Content } from '@google/genai';
 import MenuIcon from './components/icons/MenuIcon';
 
+const GREETING_PLACEHOLDER_HTML = "<p><em>Eulogio está pensando... <span class='inline-bouncing-dots'><span></span><span></span><span></span></span></em></p>";
+
 const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<AppView>(AppView.WELCOME);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -110,34 +112,51 @@ const App: React.FC = () => {
     return msgs.map(msg => ({
       role: msg.sender === 'bot' ? 'model' : 'user',
       parts: [{ text: msg.text }],
-    })).filter(msg => msg.parts[0].text.trim() !== '' && msg.parts[0].text.trim() !== 'Hola');
+    })).filter(msg => {
+        const text = msg.parts[0].text.trim();
+        return text !== '' && text !== 'Hola' && text !== GREETING_PLACEHOLDER_HTML;
+    });
   },[]);
 
   const saveCurrentConversation = useCallback(async (convId: string | null, currentMessages: ChatMessage[]) => {
     if (!convId || currentMessages.length === 0) return;
 
+    const messagesToSave = currentMessages.filter(msg => {
+        const isPlaceholder = msg.sender === 'bot' && msg.text === GREETING_PLACEHOLDER_HTML;
+        // Don't save if it's the placeholder and it's still streaming (meaning greeting didn't complete)
+        // Or if it's the placeholder and the only message (even if not streaming, if nothing else happened)
+        if (isPlaceholder && (msg.isStreaming || currentMessages.length === 1)) {
+            return false;
+        }
+        return true;
+    });
+
+    if (messagesToSave.length === 0) return;
+
     let historyForAPI: Content[] = [];
     try {
       if (chatSessionRef.current) {
-        historyForAPI = await chatSessionRef.current.getHistory();
+        const historySnapshot = await chatSessionRef.current.getHistory();
+        historyForAPI = historySnapshot.filter(entry => entry.parts[0].text !== GREETING_PLACEHOLDER_HTML);
       }
     } catch (e) {
       console.warn("Could not get history from chat session, using mapped messages:", e);
     }
     
     if (historyForAPI.length === 0 || (historyForAPI.length === 1 && historyForAPI[0]?.parts[0]?.text === "Hola")) { 
-        historyForAPI = mapMessagesToApiHistory(currentMessages);
+        historyForAPI = mapMessagesToApiHistory(messagesToSave);
     }
     
     if (historyForAPI.length >= 2 && historyForAPI[0].role === 'user' && historyForAPI[0].parts[0].text === 'Hola' && historyForAPI[1].role === 'model') {
         historyForAPI = historyForAPI.slice(1); 
     }
+    
+    historyForAPI = historyForAPI.filter(entry => entry.parts[0].text !== GREETING_PLACEHOLDER_HTML);
 
-    const isInitialBotMessageOnly = currentMessages.length === 1 && currentMessages[0].sender === 'bot';
-    if (isInitialBotMessageOnly && !currentMessages[0].text.includes("Error:")) return;
-
-    const conversationName = currentMessages.find(m => m.sender === 'user' && m.text.trim() !== 'Hola')?.text.substring(0, 30) + '...' || 
-                             `Conversación ${new Date(currentMessages[0]?.timestamp || Date.now()).toLocaleTimeString()}`;
+    const firstUserMessage = messagesToSave.find(m => m.sender === 'user' && m.text.trim() !== 'Hola');
+    const conversationName = firstUserMessage 
+                             ? firstUserMessage.text.substring(0, 30) + (firstUserMessage.text.length > 30 ? '...' : '')
+                             : "Chat";
 
     setPreviousConversations(prev => {
       const existingIndex = prev.findIndex(c => c.id === convId);
@@ -145,21 +164,24 @@ const App: React.FC = () => {
         const updatedConversations = [...prev];
         updatedConversations[existingIndex] = { 
             ...prev[existingIndex], 
-            messages: currentMessages, 
-            name: prev[existingIndex].name || conversationName, 
+            messages: messagesToSave, 
+            name: conversationName, // Consistently use the newly derived name
             timestamp: Date.now(), 
             chatHistoryForAPI: historyForAPI 
         };
-        return updatedConversations;
+        return updatedConversations.sort((a, b) => b.timestamp - a.timestamp);
       } else {
-        return [{ id: convId, name: conversationName, messages: currentMessages, timestamp: Date.now(), chatHistoryForAPI: historyForAPI }, ...prev.filter(c => c.id !== convId)];
+        return [{ id: convId, name: conversationName, messages: messagesToSave, timestamp: Date.now(), chatHistoryForAPI: historyForAPI }, ...prev.filter(c => c.id !== convId)].sort((a, b) => b.timestamp - a.timestamp);
       }
     });
   }, [mapMessagesToApiHistory]);
 
   const initializeNewChat = useCallback(async (isWelcomeStart = false) => {
     if (currentConversationId && messages.length > 0) {
-      await saveCurrentConversation(currentConversationId, messages);
+      const messagesToSaveBeforeNew = messages.filter(msg => !(msg.sender === 'bot' && msg.text === GREETING_PLACEHOLDER_HTML && msg.isStreaming));
+      if (messagesToSaveBeforeNew.length > 0 && !(messagesToSaveBeforeNew.length === 1 && messagesToSaveBeforeNew[0].text.includes("Error"))) {
+         await saveCurrentConversation(currentConversationId, messagesToSaveBeforeNew);
+      }
     }
 
     const newId = Date.now().toString();
@@ -168,7 +190,7 @@ const App: React.FC = () => {
     const initialBotGreetingId = `bot-greeting-${newId}`;
     const placeholderGreetingMessage: ChatMessage = {
       id: initialBotGreetingId,
-      text: '', 
+      text: GREETING_PLACEHOLDER_HTML, 
       sender: 'bot',
       timestamp: Date.now(),
       isStreaming: true,
@@ -181,37 +203,84 @@ const App: React.FC = () => {
     if (!newSession && process.env.API_KEY) {
         setApiKeyMissing(true);
         console.error("Failed to initialize chat session even with API_KEY.");
-         setMessages([{ id: `bot-error-${newId}`, text: "<p>Error al iniciar sesión de IA.</p>", sender: 'bot', timestamp: Date.now(), isStreaming: false }]);
+        const errorMsg = { 
+            id: `bot-error-init-${newId}`, 
+            text: "<p>Error crítico al iniciar la sesión de IA. Por favor, revisa la consola.</p>", 
+            sender: 'bot' as const, 
+            timestamp: Date.now(), 
+            isStreaming: false 
+        };
+        setMessages([errorMsg]); // Replace placeholder with error
+        await saveCurrentConversation(newId, [errorMsg]);
         return;
     }
     
     setCurrentView(AppView.CHAT);
     if (isMobile && isWelcomeStart) setIsSidebarOpen(false); 
     else if (isMobile) setIsSidebarOpen(false);
-    setIsLoading(false);
+    setIsLoading(false); 
 
     if (newSession) {
       try {
-        const stream = await sendMessageToGeminiStream(newSession, "Hola"); 
+        const stream = await sendMessageToGeminiStream(newSession, "Hola");
         let accumulatedGreeting = '';
+        let firstChunkReceived = false;
+
         if (stream) {
           for await (const chunk of stream) {
-            accumulatedGreeting += chunk.text;
-            setMessages(prevMsgs => prevMsgs.map(msg => 
-              msg.id === initialBotGreetingId ? { ...msg, text: stripMarkdownCodeFence(accumulatedGreeting) } : msg
-            ));
+            if (!firstChunkReceived && chunk.text.trim() !== '') {
+              accumulatedGreeting = chunk.text;
+              firstChunkReceived = true;
+            } else if (firstChunkReceived) {
+              accumulatedGreeting += chunk.text;
+            }
+            if (accumulatedGreeting.trim() !== '') {
+                setMessages(prevMsgs => prevMsgs.map(msg => 
+                msg.id === initialBotGreetingId ? { ...msg, text: stripMarkdownCodeFence(accumulatedGreeting) } : msg
+                ));
+            }
           }
-        } else {
-          accumulatedGreeting = "<p>Error al generar el saludo inicial.</p>";
+        }
+        
+        let finalUserVisibleText = stripMarkdownCodeFence(accumulatedGreeting);
+        if (!finalUserVisibleText.trim() || finalUserVisibleText === GREETING_PLACEHOLDER_HTML) { 
+            finalUserVisibleText = "<p>No se pudo obtener el saludo inicial o la respuesta fue vacía. Por favor, intenta enviar un mensaje.</p>";
+        }
+        const finalGreetingMessage = { ...placeholderGreetingMessage, text: finalUserVisibleText, isStreaming: false };
+        setMessages([finalGreetingMessage]);
+        
+        if (finalGreetingMessage.text !== GREETING_PLACEHOLDER_HTML && !finalGreetingMessage.text.includes("Error")) {
+           await saveCurrentConversation(newId, [finalGreetingMessage]);
+        }
+
+      } catch (error) {
+        console.error("Error streaming initial AI greeting:", error);
+        const errorMsgObject = { 
+            id: `bot-error-greeting-${newId}`, 
+            text: "<p>Error al cargar el saludo del asistente. Intenta enviar un mensaje.</p>", 
+            sender: 'bot' as const, 
+            timestamp: Date.now(), 
+            isStreaming: false 
+        };
+        setMessages([errorMsgObject]);
+        await saveCurrentConversation(newId, [errorMsgObject]);
+      }
+    } else if (!process.env.API_KEY) { 
+        const mockStream = await sendMessageToGeminiStream(newSession as any, "Hola"); 
+        let accumulatedGreeting = '';
+        if (mockStream) {
+            for await (const chunk of mockStream) {
+                 accumulatedGreeting += chunk.text;
+                 setMessages(prevMsgs => prevMsgs.map(msg => 
+                    msg.id === initialBotGreetingId ? { ...msg, text: stripMarkdownCodeFence(accumulatedGreeting) } : msg
+                ));
+            }
         }
         const finalGreetingMessage = { ...placeholderGreetingMessage, text: stripMarkdownCodeFence(accumulatedGreeting), isStreaming: false };
         setMessages([finalGreetingMessage]);
-      } catch (error) {
-        console.error("Error streaming initial AI greeting:", error);
-        setMessages([{ id: `bot-error-greeting-${newId}`, text: "<p>Error al cargar el saludo del asistente.</p>", sender: 'bot', timestamp: Date.now(), isStreaming: false }]);
-      }
+        await saveCurrentConversation(newId, [finalGreetingMessage]);
     }
-  }, [currentConversationId, messages, isMobile, saveCurrentConversation]);
+  }, [currentConversationId, messages, isMobile, saveCurrentConversation, apiKeyMissing]);
 
   const handleStartChatFromWelcome = useCallback(async () => {
     await initializeNewChat(true);
@@ -221,20 +290,25 @@ const App: React.FC = () => {
     const conversationToLoad = previousConversations.find(c => c.id === conversationId);
     if (conversationToLoad) {
       if (currentConversationId && currentConversationId !== conversationId && messages.length > 0) {
-        await saveCurrentConversation(currentConversationId, messages);
+        const messagesToSaveBeforeLoad = messages.filter(msg => !(msg.sender === 'bot' && msg.text === GREETING_PLACEHOLDER_HTML && msg.isStreaming));
+        if (messagesToSaveBeforeLoad.length > 0) {
+          await saveCurrentConversation(currentConversationId, messagesToSaveBeforeLoad);
+        }
       }
 
       setMessages(conversationToLoad.messages);
       setCurrentConversationId(conversationToLoad.id);
-      const session = createChatSession(conversationToLoad.chatHistoryForAPI);
+      const historyForLoadedChat = conversationToLoad.chatHistoryForAPI.filter(entry => entry.parts[0].text !== GREETING_PLACEHOLDER_HTML);
+      const session = createChatSession(historyForLoadedChat);
       setChatSession(session);
+
       if (!session && process.env.API_KEY) setApiKeyMissing(true);
       
       setCurrentView(AppView.CHAT);
       if (isMobile) setIsSidebarOpen(false);
       setIsLoading(false);
     }
-  }, [previousConversations, messages, currentConversationId, isMobile, saveCurrentConversation]);
+  }, [previousConversations, messages, currentConversationId, isMobile, saveCurrentConversation, apiKeyMissing]);
 
   const handleSendMessage = useCallback(async (text: string) => {
     const newUserMessage: ChatMessage = {
@@ -244,19 +318,28 @@ const App: React.FC = () => {
       timestamp: Date.now(),
     };
     
-    const updatedMessagesBeforeBot = [...messages, newUserMessage];
-    setMessages(updatedMessagesBeforeBot);
+    let messagesWithUser;
+    setMessages(prevMsgs => {
+        if (prevMsgs.length === 1 && prevMsgs[0].id.startsWith('bot-greeting-') && prevMsgs[0].isStreaming) {
+            messagesWithUser = [newUserMessage];
+        } else {
+            messagesWithUser = [...prevMsgs, newUserMessage];
+        }
+        return messagesWithUser;
+    });
+
     setIsLoading(true); 
 
     const currentChatSessionForSend = chatSessionRef.current;
 
     if (!currentChatSessionForSend) {
-      const errorText = apiKeyMissing ? "<p>Configuración de API key incompleta.</p>" : "<p>Error: Sesión de chat no iniciada.</p>";
+      const errorText = apiKeyMissing ? "<p>Configuración de API key incompleta. No se puede enviar mensaje.</p>" : "<p>Error: Sesión de chat no iniciada. No se puede enviar mensaje.</p>";
       const botErrorResponse: ChatMessage = {
         id: `bot-error-${Date.now()}`, text: errorText, sender: 'bot', timestamp: Date.now() + 1, isStreaming: false
       };
-      setMessages(prev => [...prev, botErrorResponse]);
+      setMessages(prev => [...prev, botErrorResponse]); 
       setIsLoading(false);
+      if (currentConversationId) await saveCurrentConversation(currentConversationId, [...(messagesWithUser || messages), botErrorResponse]);
       return;
     }
     
@@ -278,36 +361,47 @@ const App: React.FC = () => {
             )
           );
         }
-      } else {
-         accumulatedText = "<p>Error al obtener respuesta del stream.</p>";
+      } else { 
+         accumulatedText = "<p>Error al obtener respuesta del stream de Gemini.</p>";
       }
       
+      if (accumulatedText === GREETING_PLACEHOLDER_HTML) accumulatedText = "<p>Respuesta vacía del asistente.</p>";
+
       const finalBotMessage = { ...streamingBotMessage, text: stripMarkdownCodeFence(accumulatedText), isStreaming: false };
       
+      let finalMessagesForSave: ChatMessage[] = [];
       setMessages((prev) => {
         const msgIndex = prev.findIndex(m => m.id === botMessageId);
         if (msgIndex !== -1) {
           const updated = [...prev];
           updated[msgIndex] = finalBotMessage;
+          finalMessagesForSave = updated;
           return updated;
         }
-        return [...prev.filter(m => m.id !== botMessageId), finalBotMessage]; 
+        finalMessagesForSave = [...prev.filter(m => m.id !== botMessageId), finalBotMessage]; 
+        return finalMessagesForSave;
       });
 
-      const messagesForSave = [...updatedMessagesBeforeBot.filter(m => m.id !== botMessageId), finalBotMessage];
-      await saveCurrentConversation(currentConversationId, messagesForSave);
+      if (currentConversationId) await saveCurrentConversation(currentConversationId, finalMessagesForSave);
 
     } catch (error) {
-      console.error('Error streaming message:', error);
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === botMessageId ? { ...msg, text: '<p>Hubo un error al obtener la respuesta.</p>', isStreaming: false } : msg
-        )
-      );
+      console.error('Error streaming message to Gemini:', error);
+      const errorBotMessage = { ...streamingBotMessage, text: '<p>Hubo un error al obtener la respuesta de Gemini.</p>', isStreaming: false };
+      let finalMessagesForSaveOnError: ChatMessage[] = [];
+      setMessages((prev) => {
+         const updatedOnError = prev.map((msg) =>
+          msg.id === botMessageId ? errorBotMessage : msg
+        );
+        finalMessagesForSaveOnError = updatedOnError;
+        return updatedOnError;
+      });
+       if (currentConversationId) {
+         await saveCurrentConversation(currentConversationId, finalMessagesForSaveOnError);
+       }
     } finally {
       setIsLoading(false);
     }
-  }, [messages, apiKeyMissing, currentConversationId, saveCurrentConversation]);
+  }, [messages, apiKeyMissing, currentConversationId, saveCurrentConversation, chatSessionRef]);
 
   const handleDeleteConversation = useCallback(async (conversationIdToDelete: string) => {
     setPreviousConversations(prev => prev.filter(conv => conv.id !== conversationIdToDelete));
@@ -345,7 +439,7 @@ const App: React.FC = () => {
         isOpen={isSidebarOpen}
         onToggle={toggleSidebar}
         onNewConversation={async () => {
-          await initializeNewChat();
+          await initializeNewChat(); 
         }}
         previousConversations={previousConversations}
         onLoadConversation={async (id) => {
