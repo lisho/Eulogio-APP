@@ -1,6 +1,6 @@
 {
   "name": "Eulogio. Asistente Virtual Chatbot",
-  "description": "Eulogio, un asistente virtual con la personalidad de un experimentado trabajador social. Gruñón pero profesional, te ofrece orientación basada en el código deontológico y su amplia experiencia. Impulsado por Gemini API.",
+  "description": "Eulogio, un asistente virtual con la personalidad de un experimentado trabajador social. Gruñón pero profesional, te ofrece orientación basada en su amplia experiencia y simempre de acuerso al código deontológico. Impulsado por Gemini API.",
   "requestFramePermissions": [
     "microphone"
   ],
