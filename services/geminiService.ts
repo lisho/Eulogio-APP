@@ -11,7 +11,7 @@ if (API_KEY) {
 }
 
 const modelDetails = {
-  model: "Gemini 2.5 Flash-Lite Preview 06-17",
+  model: "gemini-2.0-flash",
 };
 
 const baseConfig = {
